@@ -10,12 +10,11 @@ from mplsoccer import Pitch
 
 def _draw_network_base(graph, positions, player_weight_totals, title):
     """
-    Shared drawing logic for the passing network: pitch setup, edges, nodes,
+    Drawing logic for the passing network: pitch setup, edges, nodes,
     names, and colorbar. Used by both plot_passing_network (intact network)
     and plot_passing_network_after_removal (network minus the playmaker).
 
-    Returns (fig, ax, pitch) so callers can add further elements (like the
-    ghost node for the removed playmaker) on top before returning.
+    Returns (fig, ax, pitch)
     """
     pitch = Pitch(pitch_type='wyscout', pitch_color='grass', line_color='white')
     fig, ax = pitch.draw(figsize=(12, 8))
@@ -32,8 +31,7 @@ def _draw_network_base(graph, positions, player_weight_totals, title):
     cmap = plt.colormaps['YlOrRd']
     node_colors = [cmap(norm(w)) for w in node_weights]
 
-    # Node size also scaled by weight_per_90 (min/max bounds keep small-weight
-    # nodes visible while still emphasizing the higher-weight ones)
+    # Node size also scaled by weight_per_90
     min_size, max_size = 400, 1800
     if node_weights.max() > node_weights.min():
         size_norm = (node_weights - node_weights.min()) / (node_weights.max() - node_weights.min())
@@ -44,7 +42,6 @@ def _draw_network_base(graph, positions, player_weight_totals, title):
     node_xs = [positions[pid][0] for pid in node_ids]
     node_ys = [positions[pid][1] for pid in node_ids]
 
-    # Draw edges first (so nodes are layered on top), thickness proportional to weight
     edge_weights = [graph[u][v]['weight'] for u, v in graph.edges()]
     max_edge_weight = max(edge_weights) if edge_weights else 1
     min_lw, max_lw = 0.5, 8
@@ -89,15 +86,13 @@ def _draw_network_base(graph, positions, player_weight_totals, title):
 
 def plot_passing_network(graph, positions, player_weight_totals, title="Passing Network"):
     """
-    Draws a passing network on a horizontal pitch (mplsoccer, broadcast-style
-    orientation, attacking goal on the right).
+    Draws a passing network on a horizontal pitch (mplsoccer, attacking goal on the right).
 
     - Nodes are placed at each player's average pitch position.
-    - Node color follows a gradient based on weight_per_90 (from
-      player_weight_totals), so more "dangerous" playmakers stand out visually.
-    - Node size is also scaled by weight_per_90, reinforcing the same signal.
-    - Edge thickness is proportional to edge weight (sum of pass_weight
-      between that specific pair of players).
+    - Node color follows a gradient based on weight_per_90, so more active and dangerous
+      players stand out visually.
+    - Node size is also scaled by weight_per_90.
+    - Edge thickness is proportional to edge weight.
     - Player names are shown in small text below each node.
 
     Parameters:
@@ -107,8 +102,7 @@ def plot_passing_network(graph, positions, player_weight_totals, title="Passing 
             'weight_per_90' (as returned by get_player_pass_weight_totals)
         title: plot title
 
-    Returns the matplotlib (fig, ax) tuple, in case further customization
-    or saving is needed.
+    Returns the matplotlib (fig, ax) tuple.
     """
     fig, ax, _ = _draw_network_base(graph, positions, player_weight_totals, title)
     return fig, ax
@@ -122,17 +116,14 @@ def plot_passing_network_after_removal(
     Draws the passing network AFTER the playmaker has been removed (see
     simulate_playmaker_removal), using the same visual logic as
     plot_passing_network, plus a "ghost node" marking where the playmaker
-    used to be: a dashed, hollow circle with his name, so a coach can see
-    at a glance who was taken out and how the remaining network reacts
-    around that gap.
+    used to be.
 
     Parameters:
         graph_after: networkx.DiGraph, the network with the playmaker already
             removed (as returned by simulate_playmaker_removal)
-        positions: dict {playerId: (x, y)} for the REMAINING players (the
-            playmaker's own position is passed separately, see playmaker_position)
+        positions: dict {playerId: (x, y)} for the remaining players 
         player_weight_totals: same as in plot_passing_network
-        playmaker_id: the removed player's id (used to look up his name for the label)
+        playmaker_id: the removed player's id
         playmaker_position: (x, y) tuple, the playmaker's average position
             before removal, used to place the ghost node
         title: plot title
@@ -156,3 +147,70 @@ def plot_passing_network_after_removal(
     )
 
     return fig, ax
+
+
+ 
+# %% [3] Forward danger-zone receptions visualization
+ 
+def plot_forward_receptions_in_danger_zone(
+    receptions_by_forward, df_players, danger_zone_center, danger_zone_radius,
+    title="Forward Receptions in the Dangerous Zone"
+):
+    """
+    Draws two side-by-side pitches (before/after removing the playmaker),
+    showing every pass reception a forward made inside the "dangerous zone"
+    (a circle near the opponent's goal, see get_forward_receptions_in_danger_zone)
+    as a dot, colored by forward, with a reception count shown in the legend.
+ 
+    Parameters:
+        receptions_by_forward: dict {forward_id: {'before': [(x,y),...], 'after': [(x,y),...]}},
+            as returned by get_forward_receptions_in_danger_zone
+        df_players: DataFrame with 'wyId' and 'shortName', for legend labels
+        danger_zone_center: (x, y) tuple, the circle's center
+        danger_zone_radius: float, the circle's radius
+        title: overall figure title
+ 
+    Returns the matplotlib (fig, axes) tuple.
+    """
+    pitch = Pitch(pitch_type='wyscout', pitch_color='grass', line_color='white', pad_right=20)
+    fig, axes = pitch.draw(nrows=1, ncols=2, figsize=(14, 7))
+ 
+    name_lookup = df_players.set_index('wyId')['shortName'].to_dict()
+    forward_ids = list(receptions_by_forward.keys())
+    color_cycle = plt.colormaps['tab10']
+    forward_colors = {fwd_id: color_cycle(i % 10) for i, fwd_id in enumerate(forward_ids)}
+ 
+    cx, cy = danger_zone_center
+ 
+    for ax, period in zip(axes, ['before', 'after']):
+        # Draw the dangerous-zone circle as a dashed reference outline
+        circle = plt.Circle(
+            (cx, cy), danger_zone_radius, fill=False, edgecolor='yellow',
+            linestyle='--', linewidth=1.5, zorder=1
+        )
+        ax.add_patch(circle)
+ 
+        for fwd_id in forward_ids:
+            points = receptions_by_forward[fwd_id][period]
+            name = name_lookup.get(fwd_id, str(fwd_id))
+            count = len(points)
+            color = forward_colors[fwd_id]
+ 
+            if points:
+                xs, ys = zip(*points)
+            else:
+                xs, ys = [], []
+ 
+            pitch.scatter(
+                xs, ys, s=90, color=color, edgecolors='black', linewidth=0.8,
+                alpha=0.85, zorder=2, ax=ax, label=f"{name} ({count})"
+            )
+ 
+        ax.set_title(period.capitalize(), fontsize=14, color='white', pad=8)
+        ax.legend(loc='upper left', fontsize=9, framealpha=0.85)
+ 
+    fig.suptitle(title, fontsize=16, color='white', y=0.98)
+    fig.patch.set_facecolor('#1a1a1a')
+ 
+    return fig, axes
+ 
