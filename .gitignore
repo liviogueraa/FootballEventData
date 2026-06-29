@@ -1,3 +1,4 @@
 data/Data
 *.csv
 *.json
+src/_pycache_
