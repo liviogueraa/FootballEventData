@@ -43,6 +43,9 @@ team_state = fun.run_team_selector(PROJECT_ROOT, df_teams)
 # end_value is how dangerous the zone the ball ends up in is, regardless of where it came from
 # alpha = 0.6, beta = 0.4, which are possible to edit in 'def compute_pass_weight'
 
+# Only players with over 1000 minutes played will appear in the final display, if you wish to change that
+# you can edit the get_player_pass_weight_totals function definition.
+
 df_team_passes = team_state['df_team_passes']
 selected_team_row = team_state['selected_team_row']
  

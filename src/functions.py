@@ -8,12 +8,12 @@ import networkx as nx
 import matplotlib.pyplot as plt
 import ipywidgets as widgets
 from IPython.display import display
-
+ 
 _EVENTS_CACHE = {}
 _MATCHES_CACHE = {}
-
+ 
 # %% [2] Loading and Filtering Functions
-
+ 
 def fix_double_escaped_unicode(text):
     """
     Fixes double-escaped unicode characters in a string.
@@ -54,25 +54,127 @@ def filter_teams_by_keyword(df_teams, keyword):
     return filtered[['wyId', 'officialName', 'area']].copy()
  
  
-def get_event_file_for_team(team_row):
-    """
-    Determines the correct events_*.json file to load based on the team's country area.
-    """
-    area_info = team_row.get('area', {}) or {}
-    country_name = area_info.get('name', '')
+AREA_TO_FILE_MAPPING = {
+    'Italy': 'events_Italy.json',
+    'England': 'events_England.json',
+    'Spain': 'events_Spain.json',
+    'France': 'events_France.json',
+    'Germany': 'events_Germany.json',
+    'European Championship': 'events_European_Championship.json',
+    'World Cup': 'events_World_Cup.json',
+}
  
-    # Mapping dictionary based exactly on your physical files in data/Data/events/
-    file_mapping = {
-        'Italy': 'events_Italy.json',
-        'England': 'events_England.json',
-        'Spain': 'events_Spain.json',
-        'France': 'events_France.json',
-        'Germany': 'events_Germany.json',
-        'European Championship': 'events_European_Championship.json',
-        'World Cup': 'events_World_Cup.json'
+# All matches_*.json / events_*.json files actually present in the dataset
+# (used to search across competitions for a team, instead of trusting the
+# team's own anagraphic 'area', which can be wrong for cases like clubs
+# registered under a different area than the league they play in, e.g.
+# AS Monaco being registered under 'Monaco' rather than 'France').
+ALL_AREAS = list(AREA_TO_FILE_MAPPING.keys())
+ 
+ 
+def load_competitions_data(project_root):
+    """
+    Loads competitions.json and returns a dict {competitionId: area_name},
+    used to determine which events/matches file a given match belongs to,
+    based on the competition's own area rather than the team's.
+    """
+    competitions_path = os.path.join(project_root, "data", "Data", "competitions.json")
+    with open(competitions_path, "r", encoding="utf-8") as f:
+        competitions_data = json.load(f)
+ 
+    return {
+        comp['wyId']: (comp.get('area', {}) or {}).get('name', '')
+        for comp in competitions_data
     }
  
-    return file_mapping.get(country_name, 'events_Italy.json'), country_name
+ 
+def get_event_files_for_team(team_row, project_root):
+    """
+    Determines ALL events_*.json files relevant to a team by checking which
+    competition(s) it actually plays in, rather than trusting the team's own
+    'area' field (which can be misleading - e.g. AS Monaco is registered
+    under area 'Monaco', not 'France', even though it plays in Ligue 1).
+ 
+    Most club teams play in a single competition, so this will usually
+    return a single-item list. National teams, however, can legitimately
+    appear across multiple competitions (e.g. World Cup and European
+    Championship) - for those, ALL relevant files are returned and should
+    be loaded and concatenated, rather than picking just one and silently
+    dropping matches from the other.
+ 
+    Returns a list of (event_file, country_name) tuples, one per
+    competition the team was found in. Sorted by number of matches found,
+    most frequent competition first.
+    """
+    team_id_str = str(team_row['wyId'])
+ 
+    from collections import Counter
+    area_counts = Counter()
+ 
+    for area_name, event_file_name in AREA_TO_FILE_MAPPING.items():
+        match_file_name = event_file_name.replace('events_', 'matches_')
+        matches_path = os.path.join(project_root, "data", "Data", "matches", match_file_name)
+        if not os.path.exists(matches_path):
+            continue
+        with open(matches_path, "r", encoding="utf-8") as f:
+            matches_data = json.load(f)
+ 
+        count = sum(1 for m in matches_data if team_id_str in m.get('teamsData', {}))
+        if count > 0:
+            area_counts[area_name] = count
+ 
+    if not area_counts:
+        print(f"[WARNING] Team {team_id_str} not found in any matches file. Falling back to events_Italy.json")
+        return [('events_Italy.json', 'Italy')]
+ 
+    if len(area_counts) > 1:
+        print(f"[INFO] Team {team_id_str} found across multiple competitions: {dict(area_counts)}. "
+              f"Using events from all of them.")
+ 
+    return [
+        (AREA_TO_FILE_MAPPING[area_name], area_name)
+        for area_name, _ in area_counts.most_common()
+    ]
+ 
+ 
+def get_event_file_for_team(team_row, project_root=None):
+    """
+    Backward-compatible single-file version of get_event_files_for_team:
+    returns only the MAIN (most frequent) competition's event file.
+ 
+    Prefer get_event_files_for_team directly in new code, since it
+    correctly handles national teams that play across multiple
+    competitions - this single-file version will silently ignore matches
+    from any secondary competition.
+ 
+    If project_root is not provided, falls back to the team's own (less
+    reliable) 'area' field directly.
+ 
+    Returns (event_file, country_name).
+    """
+    if project_root is None:
+        area_info = team_row.get('area', {}) or {}
+        country_name = area_info.get('name', '')
+        return AREA_TO_FILE_MAPPING.get(country_name, 'events_Italy.json'), country_name
+ 
+    return get_event_files_for_team(team_row, project_root)[0]
+ 
+ 
+def load_events_files(project_root, event_files, use_cache=True):
+    """
+    Loads and concatenates MULTIPLE events_*.json files into a single
+    DataFrame. Use this (instead of load_events_file) whenever a team might
+    span more than one competition (see get_event_files_for_team) - e.g.
+    national teams playing across World Cup and European Championship.
+ 
+    event_files: list of file names (e.g. ['events_World_Cup.json', 'events_European_Championship.json'])
+ 
+    Returns a single concatenated DataFrame.
+    """
+    dfs = [load_events_file(project_root, ef, use_cache=use_cache) for ef in event_files]
+    if len(dfs) == 1:
+        return dfs[0]
+    return pd.concat(dfs, ignore_index=True)
  
  
 def load_events_file(project_root, event_file, use_cache=True):
@@ -85,7 +187,7 @@ def load_events_file(project_root, event_file, use_cache=True):
         return _EVENTS_CACHE[event_file]
  
     events_path = os.path.join(project_root, "data", "Data", "events", event_file)
-    print(f"[INFO] Loading event file from disk: {event_file}. Wait before running the next cell.")
+    print(f"[INFO] Loading event file from disk: {event_file}")
  
     if not os.path.exists(events_path):
         print(f"[ERROR] File not found at {events_path}. Falling back to events_Italy.json")
@@ -117,14 +219,17 @@ def _has_tag(tags, tag_id):
  
 def load_and_filter_team_passes(project_root, team_id, team_row, use_cache=True):
     """
-    Dynamically identifies the correct league or tournament events file
-    based on the team's country area, loads it (using cache when possible)
+    Dynamically identifies the correct league/tournament events file(s) for
+    this team (a team may span more than one competition, e.g. a national
+    team playing both World Cup and European Championship - see
+    get_event_files_for_team), loads them all (using cache when possible)
     and filters successful passes for the given team.
     """
-    event_file, country_name = get_event_file_for_team(team_row)
-    print(f"[INFO] Team area '{country_name}' -> event file: {event_file}")
+    event_files_info = get_event_files_for_team(team_row, project_root)
+    event_files = [ef for ef, _ in event_files_info]
+    print(f"[INFO] Team competitions -> event files: {event_files}")
  
-    df_events = load_events_file(project_root, event_file, use_cache=use_cache)
+    df_events = load_events_files(project_root, event_files, use_cache=use_cache)
  
     df_team_passes = df_events[
         (df_events['teamId'] == team_id) &
@@ -217,6 +322,7 @@ def run_team_selector(project_root, df_teams):
     display(widgets.VBox([search_box, team_dropdown, confirm_button, output_area]))
  
     return state
+ 
 
 # %% [3] Pass weighting functions
   
@@ -310,12 +416,13 @@ def get_player_pass_weight_totals(df_passes_weighted, df_players, df_minutes=Non
     When df_minutes is provided, players with fewer than 'min_minutes'
     minutes played are excluded from the result entirely (default: 1000),
     since per-90 figures computed from very few minutes are noisy and not
-    representative of a player's real involvement. 
-    Set min_minutes=0 to disable this filter.
+    representative of a player's real involvement. Set min_minutes=0 to
+    disable this filter.
 
-    Returns a DataFrame sorted from highest to lowest weight_per_90, with columns: 
-    'playerId', 'shortName', 'weight_per_90', 'total_weight', 'pass_count', 
-    'avg_weight_per_pass', 'minutes_played', 'passes_per_90'.
+    Returns a DataFrame sorted from highest to lowest total weight (or
+    weight_per_90, if minutes are provided), with columns: playerId,
+    shortName, total_weight, pass_count, and optionally minutes_played,
+    weight_per_90, passes_per_90.
     """
     totals = (
         df_passes_weighted
@@ -362,16 +469,48 @@ def get_player_pass_weight_totals(df_passes_weighted, df_players, df_minutes=Non
 
 # %% [4] Minutes played functions
 
-def get_match_file_for_team(team_row):
+def get_match_files_for_team(team_row, project_root):
     """
-    Returns the matches_*.json file name for a given team, using the same
-    area-to-file mapping as get_event_file_for_team (matches and events
-    files follow an identical naming convention, e.g. matches_Italy.json
-    pairs with events_Italy.json).
+    Plural counterpart to get_event_files_for_team: returns the
+    matches_*.json file names for ALL competitions a team plays in (not
+    just the main one), using the same naming convention
+    (events_X.json <-> matches_X.json).
+
+    Returns a list of (match_file, country_name) tuples.
     """
-    event_file, country_name = get_event_file_for_team(team_row)
+    event_files = get_event_files_for_team(team_row, project_root)
+    return [
+        (event_file.replace('events_', 'matches_'), country_name)
+        for event_file, country_name in event_files
+    ]
+
+
+def get_match_file_for_team(team_row, project_root=None):
+    """
+    Backward-compatible single-file version: returns only the MAIN (most
+    frequent) competition's matches file. Prefer get_match_files_for_team
+    in new code to correctly handle teams spanning multiple competitions
+    (e.g. national teams).
+    """
+    event_file, country_name = get_event_file_for_team(team_row, project_root=project_root)
     match_file = event_file.replace('events_', 'matches_')
     return match_file, country_name
+
+
+def load_matches_files(project_root, match_files, use_cache=True):
+    """
+    Loads and concatenates MULTIPLE matches_*.json files into a single list
+    of match dicts. Use this (instead of load_matches_file) whenever a team
+    might span more than one competition (see get_match_files_for_team).
+
+    match_files: list of file names (e.g. ['matches_World_Cup.json', 'matches_European_Championship.json'])
+
+    Returns a single combined list.
+    """
+    combined = []
+    for mf in match_files:
+        combined.extend(load_matches_file(project_root, mf, use_cache=use_cache))
+    return combined
 
 
 def load_matches_file(project_root, match_file, use_cache=True):
@@ -440,6 +579,15 @@ def compute_minutes_played_in_match(match_data, team_id, match_duration):
     bench = formation.get('bench', []) or []
     substitutions = formation.get('substitutions', []) or []
 
+    # Some matches in this dataset have malformed entries inside
+    # 'substitutions' (e.g. a plain string instead of a
+    # {playerIn, playerOut, minute} dict) - skip those defensively rather
+    # than crashing the whole minutes calculation for that match.
+    substitutions = [
+        sub for sub in substitutions
+        if isinstance(sub, dict) and 'playerOut' in sub and 'playerIn' in sub and 'minute' in sub
+    ]
+
     # Build quick lookup: playerId -> minute they were substituted out (if any)
     subbed_out_at = {sub['playerOut']: sub['minute'] for sub in substitutions}
     # Build quick lookup: playerId -> minute they were substituted in (if any)
@@ -468,20 +616,23 @@ def get_season_minutes_played(project_root, team_id, team_row, df_events=None, u
     Computes total minutes played by each player of the given team across
     all matches in the season, by combining matches_*.json (lineups,
     substitutions) with events_*.json (to estimate real match duration).
+    Spans all competitions the team plays in (see get_match_files_for_team).
 
     If df_events is not provided, it will be loaded internally via
-    load_events_file (using the same file the team's passes come from).
+    load_events_files (using the same file(s) the team's passes come from).
 
     Returns a DataFrame with columns: playerId, minutes_played.
     """
-    match_file, country_name = get_match_file_for_team(team_row)
-    matches_data = load_matches_file(project_root, match_file, use_cache=use_cache)
+    match_files_info = get_match_files_for_team(team_row, project_root)
+    match_files = [mf for mf, _ in match_files_info]
+    matches_data = load_matches_files(project_root, match_files, use_cache=use_cache)
     team_matches = get_team_matches(matches_data, team_id)
-    print(f"[INFO] Found {len(team_matches)} matches for this team in {match_file}")
+    print(f"[INFO] Found {len(team_matches)} matches for this team across {match_files}")
 
     if df_events is None:
-        event_file, _ = get_event_file_for_team(team_row)
-        df_events = load_events_file(project_root, event_file, use_cache=use_cache)
+        event_files_info = get_event_files_for_team(team_row, project_root)
+        event_files = [ef for ef, _ in event_files_info]
+        df_events = load_events_files(project_root, event_files, use_cache=use_cache)
 
     total_minutes = {}
 
@@ -500,6 +651,26 @@ def get_season_minutes_played(project_root, team_id, team_row, df_events=None, u
 
 
 # %% [5] Playmaker-centered lineup functions
+
+# Standard tactical ordering for roles (goalkeeper -> defense -> midfield ->
+# attack), used to keep printed formation shapes and lineups readable,
+# instead of the alphabetical order ('DF','FW','GK','MD') that a plain
+# sorted() would produce.
+ROLE_ORDER = ['GK', 'DF', 'MD', 'FW']
+
+
+def sort_roles(role_items):
+    """
+    Sorts an iterable of (role, value) pairs (or just role strings) according
+    to the standard tactical order in ROLE_ORDER (GK, DF, MD, FW). Any role
+    not in ROLE_ORDER (e.g. 'UNK') is placed at the end, alphabetically.
+    """
+    def _role_key(item):
+        role = item[0] if isinstance(item, tuple) else item
+        return (ROLE_ORDER.index(role) if role in ROLE_ORDER else len(ROLE_ORDER), role)
+
+    return sorted(role_items, key=_role_key)
+
 
 def get_player_role_map(df_players):
     """
@@ -551,8 +722,9 @@ def get_typical_formation_shape(starting_matches, team_id, role_map):
             role = role_map.get(player['playerId'], 'UNK')
             role_counts[role] += 1
 
-        # Use a sorted tuple of (role, count) pairs as a hashable "shape" key
-        shape_key = tuple(sorted(role_counts.items()))
+        # Use a tactically-ordered tuple of (role, count) pairs as a hashable
+        # "shape" key, so printed shapes read as GK/DF/MD/FW, not alphabetical.
+        shape_key = tuple(sort_roles(role_counts.items()))
         shape_counter[shape_key] += 1
 
     if not shape_counter:
@@ -569,7 +741,7 @@ def get_typical_formation_shape(starting_matches, team_id, role_map):
 def get_teammate_frequencies_by_role(starting_matches, team_id, playmaker_id, role_map):
     """
     Counts, across the given matches (where the playmaker started), how
-    often each other player started alongside him, grouped by role.
+    often each OTHER player started alongside him, grouped by role.
 
     Returns a dict {role_code: Counter({playerId: count, ...})}, e.g.
     {'DF': Counter({234: 30, 567: 28, ...}), 'MD': Counter({...}), ...}
@@ -636,7 +808,7 @@ def get_substitute_candidates(df_players, team_id, role, exclude_player_ids, tea
     get_teammate_frequencies_by_role). Players who never started alongside
     the playmaker are still included, just ranked lowest (count = 0), since
     a player might be the "real" starter for that slot despite limited
-    overlap with the playmaker.
+    overlap with the playmaker (e.g. recently returned from injury).
     """
     role_counter = teammate_frequencies.get(role, {})
 
@@ -669,8 +841,7 @@ def run_playmaker_lineup_builder(project_root, team_row, df_players, player_weig
     After the lineup is built, a review step lets the user substitute any
     player with another candidate of the same role (e.g. to fix cases where
     the automatic frequency-based selection picks two players of the same
-    specific position, like two left-backs (Happens for example when selecting
-    Juventus' starting 11 with Alex Sandro and Asamoah), since role granularity is only
+    specific position, like two left-backs, since role granularity is only
     GK/DF/MD/FW). Substitutions can be made freely; clicking "Confirm Lineup"
     builds and draws the passing network for the lineup as it stands at
     that moment.
@@ -746,8 +917,9 @@ def run_playmaker_lineup_builder(project_root, team_row, df_players, player_weig
             role_map = get_player_role_map(df_players)
             playmaker_role = role_map.get(playmaker_id, 'UNK')
 
-            match_file, _ = get_match_file_for_team(team_row)
-            matches_data = load_matches_file(project_root, match_file)
+            match_files_info = get_match_files_for_team(team_row, project_root)
+            match_files = [mf for mf, _ in match_files_info]
+            matches_data = load_matches_files(project_root, match_files)
             team_matches = get_team_matches(matches_data, team_id)
             starting_matches = get_matches_where_player_started(team_matches, team_id, playmaker_id)
 
@@ -775,7 +947,7 @@ def run_playmaker_lineup_builder(project_root, team_row, df_players, player_weig
             _print_lineup(lineup)
             print("\n[INFO] Review the lineup below. If it looks wrong (e.g. two "
                   "players of the same specific position), use the controls to "
-                  "Substitute, then click 'Confirm Lineup' to re-build the network.")
+                  "substitute, then click 'Confirm Lineup' to build the network.")
 
         _refresh_substitute_out_options()
         if substitute_out_dropdown.value is not None:
@@ -825,8 +997,9 @@ def run_playmaker_lineup_builder(project_root, team_row, df_players, player_weig
             lineup_player_ids = {p['playerId'] for p in lineup}
             match_ids = [m['wyId'] for m in state['starting_matches']]
 
-            event_file, _ = get_event_file_for_team(team_row)
-            df_events_full = load_events_file(project_root, event_file)
+            event_files_info = get_event_files_for_team(team_row, project_root)
+            event_files = [ef for ef, _ in event_files_info]
+            df_events_full = load_events_files(project_root, event_files)
 
             df_pass_receivers = get_pass_receivers(
                 df_events_full, team_id, match_ids, lineup_player_ids
@@ -869,7 +1042,7 @@ def get_pass_receivers(df_events, team_id, match_ids, lineup_player_ids):
 
     Only passes where BOTH the passer and the receiver are in
     lineup_player_ids are kept (passes to/from players outside the typical
-    lineup, e.g. substitutes, are discarded entirely).
+    lineup, e.g. substitutes, are discarded entirely, per design decision).
 
     Returns a DataFrame with columns: matchId, passer_id, receiver_id,
     positions (original columns needed for the network).
@@ -971,71 +1144,71 @@ def build_passing_network(df_pass_receivers, alpha=0.6, beta=0.4, exponent=1.5):
 
 
 # %% [7] Network resilience analysis functions
- 
+
 def add_distance_attribute(graph):
     """
     Adds a 'distance' edge attribute to a copy of the graph, computed as a
     LINEAR inversion of the 'weight' attribute: distance = max_weight - weight.
- 
+
     This is needed because 'weight' represents connection STRENGTH (higher =
     more dangerous/important pass), while shortest-path algorithms in
     networkx interpret edge weights as a COST to minimize. Without this
     inversion, shortest paths would favor weak/safe passing lanes instead of
     the strong/dangerous ones we actually want to measure reachability through.
- 
+
     The linear (rather than 1/weight) inversion was chosen for interpretability:
     distance directly reflects "how far below the strongest possible
     connection" a given pass is, which is easier to explain to a non-technical
     audience (e.g. a coach) than an inverse-proportional relationship.
- 
+
     Returns a new graph (does not modify the input graph in place).
     """
     graph = graph.copy()
     weights = [data['weight'] for _, _, data in graph.edges(data=True)]
     max_weight = max(weights) if weights else 1.0
- 
+
     for u, v, data in graph.edges(data=True):
         data['distance'] = max_weight - data['weight']
- 
+
     return graph
- 
- 
+
+
 def compute_global_efficiency(graph):
     """
     Computes the Global Efficiency (Latora & Marchiori) of a weighted graph:
     the average of 1/shortest_distance across all ordered pairs of nodes,
     using the 'distance' edge attribute (see add_distance_attribute).
- 
+
     Disconnected pairs (no path between them) contribute 0 to the average
     (1/infinity = 0), rather than breaking the calculation - this is the
     standard, well-defined behavior of this metric, and is exactly what we
     want: a network that becomes disconnected after removing a node should
     show a clear drop in efficiency, not an error.
- 
+
     Returns a single float.
     """
     graph_with_distance = add_distance_attribute(graph)
     return nx.global_efficiency(graph_with_distance.to_undirected())
- 
- 
+
+
 def simulate_playmaker_removal(graph, playmaker_id):
     """
     Removes the playmaker node (and all edges touching it) from a copy of
     the graph, simulating a man-marking / targeted network attack.
- 
+
     Returns the resulting graph (does not modify the input graph in place).
     """
     graph = graph.copy()
     if playmaker_id in graph:
         graph.remove_node(playmaker_id)
     return graph
- 
- 
+
+
 def compute_efficiency_decay(graph, playmaker_id):
     """
     Computes Global Efficiency before and after removing the playmaker,
     and the percentage decay between the two.
- 
+
     Returns a dict: {
         'efficiency_before': float,
         'efficiency_after': float,
@@ -1043,109 +1216,109 @@ def compute_efficiency_decay(graph, playmaker_id):
     }
     """
     efficiency_before = compute_global_efficiency(graph)
- 
+
     graph_after = simulate_playmaker_removal(graph, playmaker_id)
     efficiency_after = compute_global_efficiency(graph_after)
- 
+
     if efficiency_before > 0:
         percent_decay = ((efficiency_before - efficiency_after) / efficiency_before) * 100
     else:
         percent_decay = 0.0
- 
+
     return {
         'efficiency_before': efficiency_before,
         'efficiency_after': efficiency_after,
         'percent_decay': percent_decay,
     }
- 
- 
+
+
 def get_weighted_in_degree(graph, df_players=None):
     """
     Computes the weighted in-degree (total incoming pass_weight) for every
     node in the graph - i.e. how much total "dangerous pass value" each
     player receives from teammates.
- 
+
     If df_players is provided, player names are attached for readability.
- 
+
     Returns a DataFrame sorted from highest to lowest in-degree, with
     columns: playerId, (shortName), in_degree_weight.
     """
     in_degrees = dict(graph.in_degree(weight='weight'))
- 
+
     df = pd.DataFrame(list(in_degrees.items()), columns=['playerId', 'in_degree_weight'])
- 
+
     if df_players is not None:
         df = df.merge(
             df_players[['wyId', 'shortName']], left_on='playerId', right_on='wyId', how='left'
         ).drop(columns=['wyId'])
         df = df[['playerId', 'shortName', 'in_degree_weight']]
- 
+
     df = df.sort_values('in_degree_weight', ascending=False).reset_index(drop=True)
     df.index = df.index + 1
     return df
- 
- 
+
+
 def compare_in_degree_before_after(graph, playmaker_id, df_players=None):
     """
     Computes weighted in-degree before and after removing the playmaker,
     and merges them into a single comparison DataFrame.
- 
+
     Returns a DataFrame with columns: playerId, (shortName), in_degree_before,
     in_degree_after, change, percent_change. Sorted by percent_change
     (most negative first - i.e. players who lost the most relative
     involvement when the playmaker is removed).
- 
+
     Note: the playmaker himself is excluded from the result, since he no
     longer exists in the "after" graph.
     """
     in_degree_before = get_weighted_in_degree(graph, df_players=df_players)
     in_degree_before = in_degree_before.rename(columns={'in_degree_weight': 'in_degree_before'})
- 
+
     graph_after = simulate_playmaker_removal(graph, playmaker_id)
     in_degree_after = get_weighted_in_degree(graph_after, df_players=df_players)
     in_degree_after = in_degree_after.rename(columns={'in_degree_weight': 'in_degree_after'})
- 
+
     merge_cols = ['playerId', 'shortName'] if df_players is not None else ['playerId']
     comparison = in_degree_before.merge(
         in_degree_after[['playerId', 'in_degree_after']], on='playerId', how='left'
     )
- 
+
     comparison = comparison[comparison['playerId'] != playmaker_id].copy()
     comparison['in_degree_after'] = comparison['in_degree_after'].fillna(0)
- 
+
     comparison['change'] = comparison['in_degree_after'] - comparison['in_degree_before']
     comparison['percent_change'] = np.where(
         comparison['in_degree_before'] > 0,
         (comparison['change'] / comparison['in_degree_before']) * 100,
         0.0
     )
- 
+
     comparison = comparison.sort_values('percent_change').reset_index(drop=True)
     comparison.index = comparison.index + 1
     return comparison
- 
- 
+
+
 def compute_average_path_length_to_targets(graph, target_player_ids):
     """
     Computes, for each target player (e.g. forwards), the average shortest
     PATH LENGTH (using the 'distance' edge attribute, see add_distance_attribute)
     from every other reachable node TO that target.
- 
+
     This measures "how easy is it, on average, for the rest of the team to
     progress the ball toward this player" - lower distance means more
     reachable/central, higher distance (or infinite, if disconnected) means
     more isolated.
- 
+
     Players with no incoming path from anyone (fully unreachable) are
     reported with average_distance = None and is_reachable = False, rather
     than being silently excluded - this is itself a meaningful result worth
     showing to a coach.
- 
+
     Returns a DataFrame with columns: playerId, (shortName), average_distance,
     is_reachable, reachable_from_count.
     """
     graph_with_distance = add_distance_attribute(graph)
- 
+
     records = []
     for target_id in target_player_ids:
         if target_id not in graph_with_distance:
@@ -1154,12 +1327,12 @@ def compute_average_path_length_to_targets(graph, target_player_ids):
                 'is_reachable': False, 'reachable_from_count': 0
             })
             continue
- 
+
         # shortest_path_length with target= gives distances FROM every node
         # TO the target, exactly what we want for "reachability toward target"
         lengths = nx.shortest_path_length(graph_with_distance, target=target_id, weight='distance')
         lengths = {source: dist for source, dist in lengths.items() if source != target_id}
- 
+
         if not lengths:
             records.append({
                 'playerId': target_id, 'average_distance': None,
@@ -1172,15 +1345,15 @@ def compute_average_path_length_to_targets(graph, target_player_ids):
                 'is_reachable': True,
                 'reachable_from_count': len(lengths),
             })
- 
+
     return pd.DataFrame(records)
- 
- 
+
+
 def compare_reachability_before_after(graph, playmaker_id, target_player_ids, df_players=None):
     """
     Computes average path length TO each target player (e.g. forwards),
     before and after removing the playmaker, and merges them for comparison.
- 
+
     Returns a DataFrame with columns: playerId, (shortName), distance_before,
     distance_after, reachable_before, reachable_after, change. If a target
     becomes unreachable after removal (reachable_after=False), 'change' is
@@ -1192,21 +1365,21 @@ def compare_reachability_before_after(graph, playmaker_id, target_player_ids, df
     before = before.rename(columns={
         'average_distance': 'distance_before', 'is_reachable': 'reachable_before'
     })[['playerId', 'distance_before', 'reachable_before']]
- 
+
     graph_after = simulate_playmaker_removal(graph, playmaker_id)
     after = compute_average_path_length_to_targets(graph_after, target_player_ids)
     after = after.rename(columns={
         'average_distance': 'distance_after', 'is_reachable': 'reachable_after'
     })[['playerId', 'distance_after', 'reachable_after']]
- 
+
     comparison = before.merge(after, on='playerId', how='left')
- 
+
     comparison['change'] = np.where(
         comparison['reachable_before'] & comparison['reachable_after'],
         comparison['distance_after'] - comparison['distance_before'],
         np.nan
     )
- 
+
     if df_players is not None:
         comparison = comparison.merge(
             df_players[['wyId', 'shortName']], left_on='playerId', right_on='wyId', how='left'
@@ -1215,63 +1388,66 @@ def compare_reachability_before_after(graph, playmaker_id, target_player_ids, df
             'playerId', 'shortName', 'distance_before', 'distance_after',
             'reachable_before', 'reachable_after', 'change'
         ]]
- 
+
     return comparison
- 
- 
+
+
 # %% [7b] Network-level weight decay (alternative to Global Efficiency)
- 
+
 def compute_lineup_weight_per_90(df_team_passes_weighted, lineup_player_ids, match_ids, project_root, team_id, team_row):
     """
     Computes weight_per_90 for each player in lineup_player_ids, using ONLY
     the passes and minutes played within the given match_ids (i.e. the
     matches where the playmaker started - see get_matches_where_player_started),
     rather than the player's full-season totals.
- 
+
     This keeps the network-level decay metric consistent with the rest of
     the resilience analysis, which is scoped to that same set of matches.
- 
+
     Returns a DataFrame with columns: playerId, weight_per_90.
     """
     passes_in_matches = df_team_passes_weighted[
         df_team_passes_weighted['matchId'].isin(match_ids) &
         df_team_passes_weighted['playerId'].isin(lineup_player_ids)
     ]
- 
+
     weight_totals = passes_in_matches.groupby('playerId')['pass_weight'].sum()
- 
-    match_file, _ = get_match_file_for_team(team_row)
-    matches_data = load_matches_file(project_root, match_file)
+
+    match_files_info = get_match_files_for_team(team_row, project_root)
+    match_files = [mf for mf, _ in match_files_info]
+    matches_data = load_matches_files(project_root, match_files)
+
+    event_files_info = get_event_files_for_team(team_row, project_root)
+    event_files = [ef for ef, _ in event_files_info]
+    df_events_for_duration = load_events_files(project_root, event_files)
+
     minutes_in_matches = {}
     for match_data in matches_data:
         if match_data['wyId'] not in match_ids:
             continue
         if str(team_id) not in match_data['teamsData']:
             continue
-        match_duration = compute_match_duration(
-            load_events_file(project_root, get_event_file_for_team(team_row)[0]),
-            match_data['wyId']
-        )
+        match_duration = compute_match_duration(df_events_for_duration, match_data['wyId'])
         match_minutes = compute_minutes_played_in_match(match_data, team_id, match_duration)
         for player_id, minutes in match_minutes.items():
             minutes_in_matches[player_id] = minutes_in_matches.get(player_id, 0) + minutes
- 
+
     records = []
     for player_id in lineup_player_ids:
         total_weight = weight_totals.get(player_id, 0.0)
         total_minutes = minutes_in_matches.get(player_id, 0)
         weight_per_90 = (total_weight / total_minutes * 90) if total_minutes > 0 else 0.0
         records.append({'playerId': player_id, 'weight_per_90': weight_per_90})
- 
+
     return pd.DataFrame(records)
- 
- 
+
+
 def compute_network_weight_decay(lineup_weight_per_90, playmaker_id):
     """
     Computes a simple, easy-to-explain "collective decay" metric: the sum of
     weight_per_90 across all players in the lineup, before and after removing
     the playmaker's own contribution from that sum.
- 
+
     This is offered as an alternative to Global Efficiency, which tends to
     show near-zero decay on small, densely-connected 11-player networks
     (most players remain mutually reachable through alternative routes even
@@ -1279,27 +1455,27 @@ def compute_network_weight_decay(lineup_weight_per_90, playmaker_id):
     Summing weight_per_90 instead directly captures how much total
     "dangerous passing output" disappears from the team's accounting when
     that one player's contribution is taken out.
- 
+
     Returns a dict: {'weight_before': float, 'weight_after': float, 'percent_decay': float}
     """
     weight_before = lineup_weight_per_90['weight_per_90'].sum()
- 
+
     playmaker_weight = lineup_weight_per_90.loc[
         lineup_weight_per_90['playerId'] == playmaker_id, 'weight_per_90'
     ]
     playmaker_weight = playmaker_weight.iloc[0] if not playmaker_weight.empty else 0.0
- 
+
     weight_after = weight_before - playmaker_weight
- 
+
     percent_decay = ((weight_before - weight_after) / weight_before * 100) if weight_before > 0 else 0.0
- 
+
     return {
         'weight_before': weight_before,
         'weight_after': weight_after,
         'percent_decay': percent_decay,
     }
- 
- 
+
+
 def get_shared_minutes_by_pair(project_root, team_id, team_row, match_ids):
     """
     Computes, for every pair of players who were both on the pitch together
@@ -1307,27 +1483,30 @@ def get_shared_minutes_by_pair(project_root, team_id, team_row, match_ids):
     those matches (approximated as the minimum of the two players' minutes
     played in each individual match - i.e. the overlap window in which both
     could plausibly have exchanged a pass).
- 
+
     Returns a dict {(player_a, player_b): shared_minutes}, with player_a
     and player_b always ordered as (min(a,b), max(a,b)) so each pair has a
     single, consistent key regardless of passer/receiver direction.
     """
-    match_file, _ = get_match_file_for_team(team_row)
-    matches_data = load_matches_file(project_root, match_file)
-    event_file, _ = get_event_file_for_team(team_row)
-    df_events = load_events_file(project_root, event_file)
- 
+    match_files_info = get_match_files_for_team(team_row, project_root)
+    match_files = [mf for mf, _ in match_files_info]
+    matches_data = load_matches_files(project_root, match_files)
+
+    event_files_info = get_event_files_for_team(team_row, project_root)
+    event_files = [ef for ef, _ in event_files_info]
+    df_events = load_events_files(project_root, event_files)
+
     shared_minutes = {}
- 
+
     for match_data in matches_data:
         if match_data['wyId'] not in match_ids:
             continue
         if str(team_id) not in match_data['teamsData']:
             continue
- 
+
         match_duration = compute_match_duration(df_events, match_data['wyId'])
         match_minutes = compute_minutes_played_in_match(match_data, team_id, match_duration)
- 
+
         players = list(match_minutes.keys())
         for i in range(len(players)):
             for j in range(i + 1, len(players)):
@@ -1335,34 +1514,34 @@ def get_shared_minutes_by_pair(project_root, team_id, team_row, match_ids):
                 key = (a, b) if a < b else (b, a)
                 overlap = min(match_minutes[a], match_minutes[b])
                 shared_minutes[key] = shared_minutes.get(key, 0) + overlap
- 
+
     return shared_minutes
- 
- 
+
+
 def get_top_weighted_edges(graph, df_players, shared_minutes, top_n=10):
     """
     Returns the top_n passer->receiver pairs with the highest WEIGHT PER 90
     SHARED MINUTES in the graph, with readable player names attached.
- 
+
     Raw edge weight (a simple sum over all matches) would unfairly favor
     pairs of players who simply played more minutes together, regardless of
     how dangerous their specific connection actually is. Dividing by the
     shared minutes between that specific pair (see get_shared_minutes_by_pair)
     and scaling to a 90-minute basis makes the comparison fair across pairs
     with very different amounts of game time together.
- 
+
     Returns a DataFrame with columns: passer_name, receiver_name,
     weight_per_90, total_weight, pass_count, shared_minutes, sorted from
     highest to lowest weight_per_90.
     """
     name_lookup = df_players.set_index('wyId')['shortName'].to_dict()
- 
+
     records = []
     for u, v, data in graph.edges(data=True):
         key = (u, v) if u < v else (v, u)
         minutes = shared_minutes.get(key, 0)
         weight_per_90 = (data['weight'] / minutes * 90) if minutes > 0 else 0.0
- 
+
         records.append({
             'passer_name': name_lookup.get(u, str(u)),
             'receiver_name': name_lookup.get(v, str(v)),
@@ -1371,20 +1550,20 @@ def get_top_weighted_edges(graph, df_players, shared_minutes, top_n=10):
             'pass_count': data.get('pass_count', None),
             'shared_minutes': minutes,
         })
- 
+
     df = pd.DataFrame(records).sort_values('weight_per_90', ascending=False).head(top_n).reset_index(drop=True)
     df.index = df.index + 1
     return df
- 
- 
+
+
 # Center and radius for the "dangerous zone" circle used to identify forward
 # receptions worth counting: centered slightly behind the goal line (so the
 # circle bulges forward to cover the box and nearby flanks evenly), with a
 # radius reaching out to roughly the edge of the final third.
 DANGER_ZONE_CENTER = (110, 50)
 DANGER_ZONE_RADIUS = 44
- 
- 
+
+
 def is_in_danger_zone(x, y):
     """
     Returns True if pitch location (x, y) falls within the "dangerous zone"
@@ -1394,41 +1573,41 @@ def is_in_danger_zone(x, y):
     cx, cy = DANGER_ZONE_CENTER
     distance = ((x - cx) ** 2 + (y - cy) ** 2) ** 0.5
     return distance <= DANGER_ZONE_RADIUS
- 
- 
+
+
 def get_forward_receptions_in_danger_zone(df_pass_receivers, forward_ids, playmaker_id):
     """
     For each forward in forward_ids, finds every pass they received (as
     receiver_id in df_pass_receivers) that landed inside the "dangerous
     zone" (see is_in_danger_zone), using the pass's END coordinates
     (positions[1]).
- 
+
     Returns a dict {forward_id: {'before': [(x, y), ...], 'after': [(x, y), ...]}}:
       - 'before' includes ALL such receptions, regardless of who passed it
       - 'after' includes only those where the passer was NOT the playmaker
         (i.e. an observational approximation of "receptions that would
         still happen if the playmaker were taken out of the equation")
- 
+
     This is a count of OBSERVED events (not a simulated shortest-path
     metric), so it is robust to the "one lucky long pass" issue that an
     unweighted shortest-path calculation can suffer from.
     """
     results = {fwd_id: {'before': [], 'after': []} for fwd_id in forward_ids}
- 
+
     for row in df_pass_receivers.itertuples(index=False):
         if row.receiver_id not in results:
             continue
- 
+
         end_x, end_y = row.positions[1]['x'], row.positions[1]['y']
         if not is_in_danger_zone(end_x, end_y):
             continue
- 
+
         results[row.receiver_id]['before'].append((end_x, end_y))
         if row.passer_id != playmaker_id:
             results[row.receiver_id]['after'].append((end_x, end_y))
- 
+
     return results
- 
+
  
 # %% [8] HTML report generation
  
