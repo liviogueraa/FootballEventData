@@ -6,6 +6,8 @@ The core of the project is built around an interactive pipeline (`app.py`) that 
 
 Currently, the `report/` folder contains two finalized and very opposite examples of these network resilience outputs, complete with my personal match analyst insights on Éver Banega (Sevilla FC) and Lucas Biglia (AC Milan) impacts on their respective teams.
 
+_Every idea and design choice in this project is entirely personal and the result of my own independent work, generative AI was used to help in coding_
+
 ---
 
 ## 📂 Project Structure
@@ -80,8 +82,6 @@ The entire analysis workflow is contained within `app.py` and divided into 5 cel
 * **Forward Receptions in the Danger Zone:** A purely empirical, observed spatial plot capturing every pass received by a forward inside a specified radius from the opponent's goal ($Danger\ Zone$). The "After" condition filters out all direct passes originating from the isolated playmaker. This option was preferred to a shortest path length type construct as with such dense graphs it is hard to compute an interpretable similar metric.
 
 ---
-
-_Every idea and design choice in this project is entirely personal and the result of my own independent work, generative AI was occasionally used to help in coding_
 
 ## 👥 Author
 _Livio Guerra - Leiden University (Student ID: s4444159)_  
