@@ -81,7 +81,7 @@ The entire analysis workflow is contained within `app.py` and divided into 5 cel
 
 ---
 
-_Every idea and design choice in this project is entirely personal and the result of my own independent work_
+_Every idea and design choice in this project is entirely personal and the result of my own independent work, generative AI was occasionally used to help in coding_
 
 ## 👥 Author
 _Livio Guerra - Leiden University (Student ID: s4444159)_  
