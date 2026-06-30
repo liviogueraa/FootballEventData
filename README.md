@@ -63,15 +63,15 @@ The entire analysis workflow is contained within `app.py` and divided into 5 cel
 
 ## 📊 Metrics Computed and Design Choices Explanation
 
-* **Pass Receiver Evaluation:** Since the Pappalardo et al. dataset does not explicitly document the recipient of a pass, a sequential proximity logic was implemented. A pass is credited as successful to a specific teammate if the immediate subsequent chronological event involves that same player.
+* **Pass Receiver Evaluation:** Since the Pappalardo et al. dataset does not explicitly state the recipient of a pass, a sequential proximity logic was implemented. A pass is registered as successful to a specific teammate if the immediate subsequent chronological event involves that same player.
 
-* **Passing Weights Formula ($w$):** To balance both pass quantity and pass quality, the weight formula scales progressive threat. It is calculated as:
+* **Passing Weights Formula ($w$):** To balance both pass quantity and pass quality, the weight formula tries to conceptualize progressive threat. It is calculated as:
   $$w = \alpha \cdot \Delta_{value} + \beta \cdot End_{value}$$
-  Where $\Delta_{value}$ represents the ball progression toward a more dangerous zone (calculated via a non-linear distance-to-goal function as $End_{danger} - Start_{danger}$), and $End_{value}$ measures the absolute danger level of the target zone. The parameters $\alpha = 0.6$ and $\beta = 0.4$ were chosen rationally to prevent the metric from biasing strictly towards either high-frequency safe passes or low-frequency high-risk long balls.
+  Where $\Delta_{value}$ represents the ball progression toward a more dangerous zone (where each zone is assigned a danger value via a non-linear distance-to-goal function) as $End_{danger} - Start_{danger}$), and $End_{value}$ measures the absolute danger level of the target zone. The parameters $\alpha = 0.6$ and $\beta = 0.4$ were chosen rationally to prevent the metric from biasing strictly towards either high-frequency safe passes or low-frequency high-risk long balls.
 
 * **Interactive Formation Builder:** To build a realistic formation network, the script filters all matches where the chosen playmaker was in the starting XI. It extracts the team's most frequent tactical scheme (e.g., 4-3-3) and populates it by selecting the players who shared the highest number of minutes on the pitch with the playmaker. This design choice guarantees that the simulated baseline represents the most stable tactical environment of the team. In case the chosen formation presents some inconsistencies, the user is able substitute one or more players.
 
-* **Collective Passing Output Decay:** This is the first of the metrics presented in the output file and it simply calculates the percentage of the sum of passing weights per 90 minutes attributable to the playmaker..  As a personal interpretation rule a collective decay exceeding **15-16%** could indicate that the playmaker is structurally vital to the team's transition phase.
+* **Collective Passing Output Decay:** This is the first of the metrics presented in the output file and it simply calculates the percentage of the sum of passing weights per 90 minutes attributable to the playmaker. As a personal interpretation rule a collective decay exceeding **15-16%** could indicate that the playmaker is structurally vital to the team's transition phase.
 
 * **Dangerous Passing Lanes:** These tables extract the top 10 strongest edge connections (sender $\rightarrow$ receiver by weight per 90 shared minutes) with and without the presence of the playmaker. Comparing these highlights which passing lanes emerge as best alternatives going forward without going through the playmaker.
 
@@ -81,6 +81,7 @@ The entire analysis workflow is contained within `app.py` and divided into 5 cel
 
 ---
 
+_Every idea and design choice in this project is entirely personal and the result of my own independent work, but generative AI was used to help in coding_
 
 ## 👥 Author
 _Livio Guerra - Leiden University (Student ID: s4444159)_  
